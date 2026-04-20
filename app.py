@@ -3,143 +3,159 @@ import pandas as pd
 import plotly.express as px
 import io
 
-# --- 1. BRANDING & STYLE ---
+# --- 1. BRANDING & UI CONFIG ---
 st.set_page_config(page_title="Grey | Customer Intelligence", layout="wide", page_icon="🔘")
 
+# Custom Grey.co Style UI
 st.markdown("""
     <style>
-    .main { background-color: #F8F9FB; }
-    .stMetric { background-color: #ffffff; padding: 20px; border-radius: 12px; border: 1px solid #EDEFEF; }
-    h1, h2, h3 { color: #1A1A1A; font-family: 'Inter', sans-serif; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; background-color: #F8F9FB; }
+    .metric-card { background: white; padding: 20px; border-radius: 12px; border: 1px solid #EEF0F2; }
+    .insight-card { background: #000000; color: white; padding: 20px; border-radius: 12px; margin-bottom: 20px; }
+    .stMetric { background: white; padding: 15px; border-radius: 10px; border: 1px solid #EEF0F2; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. DATA ENGINE ---
+# --- 2. THE DATA BRAIN ---
 def process_data(file):
     if file is None: return None
     try:
         bytes_data = file.getvalue()
         text_data = bytes_data.decode("utf-8").splitlines()
-        
-        # --- NEW STRICT HEADER SEARCH ---
         header_idx = None
         for i, line in enumerate(text_data):
             clean_line = line.replace('"', '').strip()
-            # The real header row starts with 'Teammate' and has many columns
-            if clean_line.startswith("Teammate") and "Conversations assigned" in clean_line:
+            if clean_line.startswith("Teammate") and "Conversations" in clean_line:
                 header_idx = i
                 break
+        if header_idx is None: return None
         
-        if header_idx is None:
-            st.error("Could not find the data table. Please check your CSV format.")
-            return None
-        
-        # Read the CSV starting from the correct row
         df = pd.read_csv(io.StringIO("\n".join(text_data[header_idx:])))
-        
-        # Standardize column names
         df.columns = df.columns.str.strip().str.replace('"', '').str.replace("'", "")
         
-        # --- COLUMN MAPPING ---
-        def find_actual_col(targets):
-            for col in df.columns:
-                if any(t.lower() == col.lower() or t.lower() in col.lower() for t in targets):
-                    return col
-            return None
+        # Robust Mapping
+        def find_col(keys):
+            return next((c for c in df.columns if any(k.lower() in c.lower() for k in keys)), None)
 
-        t_col = find_actual_col(['Teammate'])
-        a_col = find_actual_col(['Conversations assigned'])
-        cl_col = find_actual_col(['Closed conversations by teammates', 'Closed conversations'])
-        cs_col = find_actual_col(['Teammate CSAT score', 'CSAT score'])
-        fr_col = find_actual_col(['Median First response time', 'First response'])
-        
-        if not all([t_col, a_col, cl_col]):
-            st.error(f"Critical columns missing! Found: {list(df.columns)}")
-            return None
+        cols = {
+            't': find_col(['Teammate']),
+            'a': find_col(['Conversations assigned']),
+            'cl': find_col(['Closed conversations']),
+            'cs': find_col(['CSAT score']),
+            'fr': find_col(['First response time']),
+            'eff': find_col(['closed per active hour']) # Efficiency metric
+        }
 
-        # Clean Rows: Remove Summary row
-        df = df[df[t_col].notna()]
-        df = df[~df[t_col].str.contains('Summary|Total', case=False, na=False)]
-        df[t_col] = df[t_col].str.strip()
+        df = df[df[cols['t']].notna() & ~df[cols['t']].str.contains('Summary|Total', case=False, na=False)]
+        df[cols['t']] = df[cols['t']].str.strip()
         
-        # Numeric clean
-        for col in [a_col, cl_col, fr_col]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        # Numeric Clean
+        for c in [cols['a'], cols['cl'], cols['fr'], cols['eff']]:
+            if c: df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         
-        # CSAT clean
-        if cs_col:
-            df['CSAT_Numeric'] = df[cs_col].astype(str).str.extract(r'(\d+\.?\d*)').astype(float).fillna(0)
-        else:
-            df['CSAT_Numeric'] = 0.0
-            
-        return df, {'t': t_col, 'a': a_col, 'cl': cl_col, 'fr': fr_col, 'cs': cs_col}
-    except Exception as e:
-        st.error(f"Error in data processing: {e}")
-        return None
+        df['CSAT_Numeric'] = df[cols['cs']].astype(str).str.extract(r'(\d+\.?\d*)').astype(float).fillna(0)
+        
+        return df, cols
+    except: return None
 
 # --- 3. SIDEBAR ---
 with st.sidebar:
-    st.title("Settings")
-    current_file = st.file_uploader("Upload Current CSV", type="csv")
-    previous_file = st.file_uploader("Upload Previous CSV", type="csv")
+    st.image("https://images.squarespace-cdn.com/content/v1/6149a46f2541810d72023d60/8604314e-6e2c-473d-8e8e-d965e6480928/Grey_Logo_Black.png", width=120)
+    st.title("Data Intelligence")
+    curr_file = st.file_uploader("Current Period (April)", type="csv")
+    prev_file = st.file_uploader("Previous Period (March)", type="csv")
     st.divider()
-    st.info("Upload Intercom 'Teammate Performance' exports.")
+    st.caption("Grey Customer Success Tool v2.0")
 
 # --- 4. MAIN DASHBOARD ---
-if current_file:
-    result = process_data(current_file)
-    if result:
-        df, m = result
+if curr_file:
+    curr_res = process_data(curr_file)
+    if curr_res:
+        df, m = curr_res
         
-        st.title("📊 Teammate Intelligence")
+        # --- NARRATIVE INTELLIGENCE SECTION ---
+        st.markdown('<div class="insight-card">', unsafe_allow_html=True)
+        st.subheader("💡 Strategic Intelligence")
         
-        # Top KPIs
-        avg_csat = df['CSAT_Numeric'][df['CSAT_Numeric']>0].mean() if not df[df['CSAT_Numeric']>0].empty else 0
-        total_a = df[m['a']].sum()
-        med_frt = df[m['fr']].median()
+        # Logic for automated insights
+        top_perf = df.loc[df['CSAT_Numeric'].idxmax(), m['t']]
+        slowest_resp = df.loc[df[m['fr']].idxmax(), m['t']]
+        efficiency_avg = df[m['eff']].mean()
+        
+        col_ins1, col_ins2 = st.columns(2)
+        with col_ins1:
+            st.write(f"**Quality Lead:** {top_perf} is currently setting the team benchmark for quality.")
+            st.write(f"**Efficiency Benchmark:** The team is closing an average of {efficiency_avg:.1f} tickets per active hour.")
+        
+        if prev_file:
+            prev_res = process_data(prev_file)
+            if prev_res:
+                pdf, pm = prev_res
+                # Quick trend logic
+                curr_vol = df[m['a']].sum()
+                prev_vol = pdf[pm['a']].sum()
+                vol_change = ((curr_vol - prev_vol) / prev_vol) * 100
+                with col_ins2:
+                    trend_text = "up" if vol_change > 0 else "down"
+                    st.write(f"**Capacity Note:** Ticket volume is {trend_text} by {abs(vol_change):.1f}% compared to last period.")
+                    if vol_change > 10 and df[m['fr']].median() > pdf[pm['fr']].median():
+                        st.write("⚠️ **Alert:** Response times are increasing alongside volume. Capacity limit reached.")
+        st.markdown('</div>', unsafe_allow_html=True)
 
+        # --- KPI ROW ---
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Total Tickets", f"{int(total_a):,}")
-        k2.metric("Avg CSAT", f"{avg_csat:.1f}%")
-        k3.metric("Med. Response", f"{int(med_frt)}s")
-        k4.metric("Active Team", len(df))
+        k1.metric("Tickets Assigned", f"{int(df[m['a']].sum()):,}")
+        k2.metric("Avg Team CSAT", f"{df['CSAT_Numeric'][df['CSAT_Numeric']>0].mean():.1f}%")
+        k3.metric("Response Time (Med)", f"{int(df[m['fr']].median())}s")
+        k4.metric("Efficiency (Tkt/Hr)", f"{efficiency_avg:.1f}")
 
         # --- GAP ANALYSIS ---
-        if previous_file:
+        if prev_file and prev_res:
             st.divider()
-            st.header("📉 Gap Analysis")
-            p_result = process_data(previous_file)
-            if p_result:
-                pdf, pm = p_result
-                gap_df = pd.merge(df[[m['t'], 'CSAT_Numeric', m['a']]], 
-                                  pdf[[pm['t'], 'CSAT_Numeric', pm['a']]], 
-                                  on=m['t'], suffixes=('_curr', '_prev'))
-                
-                if not gap_df.empty:
-                    gap_df['CSAT_Delta'] = gap_df['CSAT_Numeric_curr'] - gap_df['CSAT_Numeric_prev']
-                    
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.subheader("🚀 CSAT Improvers")
-                        imp = gap_df.sort_values('CSAT_Delta', ascending=False).head(5)
-                        st.plotly_chart(px.bar(imp, x='CSAT_Delta', y=m['t'], orientation='h', color_discrete_sequence=['#2ECC71']), use_container_width=True)
-                    with c2:
-                        st.subheader("⚠️ CSAT Declines")
-                        dec = gap_df.sort_values('CSAT_Delta', ascending=True).head(5)
-                        st.plotly_chart(px.bar(dec, x='CSAT_Delta', y=m['t'], orientation='h', color_discrete_sequence=['#E74C3C']), use_container_width=True)
+            st.header("📉 Performance Gap Analysis")
+            pdf, pm = prev_res
+            gap_df = pd.merge(df[[m['t'], 'CSAT_Numeric', m['a']]], 
+                              pdf[[pm['t'], 'CSAT_Numeric', pm['a']]], 
+                              on=m['t'], suffixes=('_curr', '_prev'))
+            
+            gap_df['CSAT_Delta'] = gap_df['CSAT_Numeric_curr'] - gap_df['CSAT_Numeric_prev']
+            
+            g1, g2 = st.columns(2)
+            with g1:
+                st.subheader("🚀 CSAT Gains")
+                fig_g = px.bar(gap_df.sort_values('CSAT_Delta', ascending=False).head(5), 
+                               x='CSAT_Delta', y=m['t'], orientation='h', color_discrete_sequence=['#00D1FF'])
+                st.plotly_chart(fig_g, use_container_width=True)
+            with g2:
+                st.subheader("🔻 CSAT Drops")
+                fig_d = px.bar(gap_df.sort_values('CSAT_Delta').head(5), 
+                               x='CSAT_Delta', y=m['t'], orientation='h', color_discrete_sequence=['#FF4B4B'])
+                st.plotly_chart(fig_d, use_container_width=True)
 
-        # --- COACHING QUADRANT ---
+        # --- THE INTELLIGENCE QUADRANT ---
         st.divider()
-        st.header("🎯 Coaching Strategy")
-        fig_quad = px.scatter(df, x=m['a'], y='CSAT_Numeric', text=m['t'], size=m['cl'], color='CSAT_Numeric',
-                             color_continuous_scale='RdYlGn', labels={m['a']: 'Volume', 'CSAT_Numeric': 'CSAT %'}, height=600)
-        fig_quad.add_hline(y=df['CSAT_Numeric'].median(), line_dash="dot")
-        fig_quad.add_vline(x=df[m['a']].median(), line_dash="dot")
-        st.plotly_chart(fig_quad, use_container_width=True)
+        st.header("🎯 Coaching & Capacity Quadrant")
+        fig_q = px.scatter(df, x=m['eff'], y='CSAT_Numeric', text=m['t'], size=m['a'], color='CSAT_Numeric',
+                          color_continuous_scale='Viridis', labels={m['eff']: 'Tickets per Hour', 'CSAT_Numeric': 'Quality (CSAT %)'},
+                          height=600)
+        # Quadrant lines based on medians
+        fig_q.add_hline(y=df['CSAT_Numeric'].median(), line_dash="dot", annotation_text="Quality Median")
+        fig_q.add_vline(x=df[m['eff']].median(), line_dash="dot", annotation_text="Efficiency Median")
+        
+        st.plotly_chart(fig_q, use_container_width=True)
+        
+        with st.expander("Reading the Intelligence Quadrant"):
+            st.write("""
+            - **Top Right (High Speed, High Quality):** Future Leads / Top Performers.
+            - **Top Left (Low Speed, High Quality):** Meticulous workers. Good for complex tickets.
+            - **Bottom Right (High Speed, Low Quality):** BURN-OUT RISK. Moving too fast, making errors.
+            - **Bottom Left (Low Speed, Low Quality):** Training required.
+            """)
 
-        with st.expander("Raw Data View"):
-            st.dataframe(df)
+        # --- DATA TABLE ---
+        with st.expander("Full Intelligence Table"):
+            st.dataframe(df.sort_values('CSAT_Numeric', ascending=False), use_container_width=True)
 else:
-    st.header("Welcome, Zeek!")
-    st.info("Upload your CSV files in the sidebar to begin.")
+    st.header("Grey Customer Intelligence")
+    st.info("Upload your Intercom exports to begin generating strategic insights.")
