@@ -5,6 +5,7 @@ import plotly.express as px
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Grey CS Intelligence", layout="wide", page_icon="📈")
 
+# Custom Styling
 st.markdown("""
     <style>
     .main { background-color: #f5f7f9; }
@@ -17,112 +18,127 @@ st.title("📊 Grey Customer Success Intelligence")
 def process_data(file):
     if file is None: return None
     
-    # 1. Find the header row dynamically
-    content = file.getvalue().decode("utf-8").splitlines()
-    header_idx = None
-    for i, line in enumerate(content):
-        if "Teammate" in line and "Conversations assigned" in line:
-            header_idx = i
-            break
-    
-    if header_idx is None:
+    # 1. Read the file into a dataframe
+    # We read the whole thing and then find the header row
+    try:
+        raw_df = pd.read_csv(file, header=None)
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
         return None
 
-    # 2. Load Data
+    # 2. Find the row that contains 'Teammate'
+    header_row_index = None
+    for i, row in raw_df.iterrows():
+        if row.astype(str).str.contains('Teammate', case=False).any():
+            header_row_index = i
+            break
+            
+    if header_row_index is None:
+        st.error("Could not find 'Teammate' column in the file.")
+        return None
+
+    # 3. Re-read the file from that header row
     file.seek(0)
-    df = pd.read_csv(file, skiprows=header_idx)
-    df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
-
-    # 3. Clean names and remove the "Summary" row if it exists to avoid double counting
-    df = df[~df['Teammate'].str.contains('Summary|Total', na=False, case=False)]
-
-    # 4. Clean Numeric Columns
-    cols_to_clean = [
-        'Conversations assigned', 'Conversations replied to', 'Replies sent', 
-        'Closed conversations by teammates', 'Median First response time',
-        'Median Teammate handling time', 'Conversations closed per active hour'
-    ]
+    df = pd.read_csv(file, skiprows=header_row_index)
     
-    for col in cols_to_clean:
-        if col in df.columns:
-            # Remove commas and convert to float
-            df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    # 4. CLEAN COLUMN NAMES (The most important part)
+    # This removes extra spaces, quotes, and makes everything lowercase for easy matching
+    df.columns = df.columns.str.strip().str.replace('"', '').str.replace("'", "")
     
-    # 5. Extract CSAT Numeric
-    if 'Teammate CSAT score' in df.columns:
-        df['CSAT_Val'] = df['Teammate CSAT score'].astype(str).str.extract(r'(\d+\.?\d*)').astype(float).fillna(0)
-    
-    return df
+    # 5. Map Columns Dynamically (Look for keywords rather than exact names)
+    def find_col(keywords):
+        for col in df.columns:
+            if any(k.lower() in col.lower() for k in keywords):
+                return col
+        return None
 
-# --- SIDEBAR ---
-st.sidebar.header("Upload Center")
+    col_map = {
+        'teammate': find_col(['Teammate']),
+        'assigned': find_col(['Conversations assigned']),
+        'replied': find_col(['Conversations replied to']),
+        'closed': find_col(['Closed conversations']),
+        'csat': find_col(['CSAT score']),
+        'frt': find_col(['First response time']),
+        'efficiency': find_col(['closed per active hour'])
+    }
+
+    # Verify we found the main ones
+    if not col_map['teammate'] or not col_map['assigned']:
+        st.error(f"Missing critical columns. Found: {list(df.columns)}")
+        return None
+
+    # 6. Filter out the Summary row and empty rows
+    df = df[df[col_map['teammate']].notna()]
+    df = df[~df[col_map['teammate']].str.contains('Summary|Total', na=False, case=False)]
+
+    # 7. Convert Numeric data
+    numeric_cols = [col_map['assigned'], col_map['replied'], col_map['closed'], col_map['frt']]
+    for col in numeric_cols:
+        if col:
+            df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '').str.replace('"', ''), errors='coerce').fillna(0)
+
+    # 8. Clean CSAT
+    if col_map['csat']:
+        df['CSAT_Numeric'] = df[col_map['csat']].astype(str).str.extract(r'(\d+\.?\d*)').astype(float).fillna(0)
+    
+    # Return cleaned df and the mapping
+    return df, col_map
+
+# --- APP LOGIC ---
 current_file = st.sidebar.file_uploader("Upload Current CSV", type="csv")
-previous_file = st.sidebar.file_uploader("Upload Previous CSV (Optional)", type="csv")
+previous_file = st.sidebar.file_uploader("Upload Previous CSV", type="csv")
 
 if current_file:
-    df = process_data(current_file)
-    
-    if df is None or df.empty:
-        st.error("Could not find teammate data in this file. Please check the export format.")
-    else:
-        # --- CALCULATE TOTALS MANUALLY (More reliable than looking for a 'Summary' row) ---
-        total_tickets = df['Conversations assigned'].sum()
-        avg_csat = df['CSAT_Val'][df['CSAT_Val'] > 0].mean() # Avg of teammates who have a score
-        med_response = df['Median First response time'].median()
+    result = process_data(current_file)
+    if result:
+        df, cmap = result
+        
+        # --- CALCULATIONS ---
+        total_tickets = df[cmap['assigned']].sum()
+        avg_csat = df['CSAT_Numeric'][df['CSAT_Numeric'] > 0].mean()
+        med_frt = df[cmap['frt']].median()
 
-        # --- TOP METRICS ---
+        # --- METRICS ---
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Tickets", f"{int(total_tickets):,}")
-        m2.metric("Avg Team CSAT", f"{avg_csat:.1f}%")
-        m3.metric("Median Response", f"{int(med_response)}s")
-        m4.metric("Active Teammates", len(df))
+        m1.metric("Total Assigned", f"{int(total_tickets):,}")
+        m2.metric("Avg CSAT", f"{avg_csat:.1f}%")
+        m3.metric("Med. Response", f"{int(med_frt)}s")
+        m4.metric("Team Size", len(df))
 
         # --- GAP ANALYSIS ---
         if previous_file:
-            prev_df = process_data(previous_file)
-            if prev_df is not None:
-                st.subheader("📉 Gap Analysis")
-                prev_total = prev_df['Conversations assigned'].sum()
-                prev_csat = prev_df['CSAT_Val'][prev_df['CSAT_Val'] > 0].mean()
+            prev_result = process_data(previous_file)
+            if prev_result:
+                pdf, pcmap = prev_result
+                st.subheader("📉 Performance Gap Analysis")
                 
+                prev_total = pdf[pcmap['assigned']].sum()
                 vol_delta = total_tickets - prev_total
-                csat_delta = avg_csat - prev_csat
                 
                 g1, g2 = st.columns(2)
-                g1.metric("Volume Change", f"{int(vol_delta)} Tickets", delta=int(vol_delta), delta_color="inverse")
-                g2.metric("CSAT Shift", f"{avg_csat:.1f}%", delta=f"{csat_delta:.1f}%")
+                g1.metric("Volume vs Last Upload", f"{int(total_tickets)}", delta=int(vol_delta), delta_color="inverse")
+                
+                prev_csat = pdf['CSAT_Numeric'][pdf['CSAT_Numeric'] > 0].mean()
+                csat_delta = avg_csat - prev_csat
+                g2.metric("CSAT vs Last Upload", f"{avg_csat:.1f}%", delta=f"{csat_delta:.1f}%")
 
-        # --- VISUALS ---
+        # --- CHARTS ---
         st.divider()
-        col_a, col_b = st.columns(2)
-
-        with col_a:
-            st.write("### 🏆 Teammate CSAT Rankings")
-            # Filter out people with 0 CSAT for the chart
-            chart_df = df[df['CSAT_Val'] > 0].sort_values('CSAT_Val')
-            fig_csat = px.bar(chart_df, x='CSAT_Val', y='Teammate', 
-                              orientation='h', color='CSAT_Val', 
-                              color_continuous_scale='RdYlGn', text_auto='.1f')
-            st.plotly_chart(fig_csat, use_container_width=True)
-
-        with col_b:
-            st.write("### ⚡ Workload vs. Speed")
-            fig_scatter = px.scatter(df, x='Conversations assigned', y='Median First response time',
-                                     size='Closed conversations by teammates', hover_name='Teammate',
-                                     color='CSAT_Val', title="Bigger bubble = More closures")
-            st.plotly_chart(fig_scatter, use_container_width=True)
-
-        # --- INTELLIGENCE ---
-        st.subheader("💡 Automated Intelligence")
-        
-        top_perf = df.loc[df['Conversations closed per active hour'].idxmax()]
-        slowest = df.loc[df['Median First response time'].idxmax()]
-        
         c1, c2 = st.columns(2)
-        c1.info(f"✅ **Efficiency Hero:** **{top_perf['Teammate']}** is the fastest closer ({top_perf['Conversations closed per active hour']} tkt/hr).")
-        c2.warning(f"⚠️ **Response Alert:** **{slowest['Teammate']}** has the highest wait time at {int(slowest['Median First response time'])}s.")
+        
+        with c1:
+            st.write("### 🏆 CSAT Ranking")
+            fig = px.bar(df.sort_values('CSAT_Numeric'), x='CSAT_Numeric', y=cmap['teammate'], 
+                         orientation='h', color='CSAT_Numeric', color_continuous_scale='RdYlGn')
+            st.plotly_chart(fig, use_container_width=True)
+            
+        with c2:
+            st.write("### ⚡ Workload Efficiency")
+            fig2 = px.scatter(df, x=cmap['assigned'], y=cmap['frt'], 
+                              size=cmap['closed'], hover_name=cmap['teammate'],
+                              title="Bubble Size = Tickets Closed")
+            st.plotly_chart(fig2, use_container_width=True)
 
-        with st.expander("View Cleaned Data Table"):
-            st.dataframe(df)
-else:
-    st.info("Please upload your CSV to start.")
+        # --- TEAM DRILLDOWN ---
+        with st.expander("🔍 View Detailed Teammate Breakdown"):
+            st.table(df[[cmap['teammate'], cmap['assigned'], 'CSAT_Numeric', cmap['frt']]])
