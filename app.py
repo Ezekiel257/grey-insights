@@ -6,141 +6,132 @@ import io
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Grey CS Intelligence", layout="wide", page_icon="📈")
 
-st.markdown("""
-    <style>
-    .main { background-color: #f5f7f9; }
-    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #eee; }
-    </style>
-    """, unsafe_allow_html=True)
-
 st.title("📊 Grey Customer Success Intelligence")
 
 def process_data(file):
     if file is None: return None
     
     try:
-        # 1. Read the file as raw text to skip the 'junk' rows at the top
+        # 1. Read raw text
         bytes_data = file.getvalue()
         text_data = bytes_data.decode("utf-8").splitlines()
         
-        # 2. Find the index where the actual table starts
+        # 2. Find the header row
         header_row_index = None
         for i, line in enumerate(text_data):
-            # We look for the line that contains 'Teammate' AND 'Conversations assigned'
-            if "Teammate" in line and "Conversations assigned" in line:
+            if "Teammate" in line and "Conversations" in line:
                 header_row_index = i
                 break
         
         if header_row_index is None:
-            st.error("Could not find the data table in this file. Are you sure this is a 'Teammate Performance' export?")
+            st.error("Could not find the data table. Please ensure you are uploading an Intercom Teammate Performance CSV.")
             return None
 
-        # 3. Read the CSV starting exactly from that row
-        # We use io.StringIO to turn our filtered text back into a 'file' for pandas
+        # 3. Load CSV
         clean_text = "\n".join(text_data[header_row_index:])
         df = pd.read_csv(io.StringIO(clean_text))
         
-        # 4. Clean column names (strip quotes and spaces)
+        # 4. Clean column names
         df.columns = df.columns.str.strip().str.replace('"', '').str.replace("'", "")
         
-        # 5. Define critical columns by keyword to handle variations
+        # 5. DYNAMIC COLUMN MAPPING
         def find_col(keywords):
             for col in df.columns:
                 if any(k.lower() in col.lower() for k in keywords):
                     return col
             return None
 
-        col_map = {
-            'teammate': find_col(['Teammate']),
-            'assigned': find_col(['Conversations assigned']),
-            'closed': find_col(['Closed conversations']),
-            'csat': find_col(['CSAT score']),
-            'frt': find_col(['First response time']),
-            'efficiency': find_col(['closed per active hour'])
+        # Map columns or use a dummy name if not found
+        t_col = find_col(['Teammate']) or 'Teammate'
+        a_col = find_col(['Conversations assigned']) or 'Assigned'
+        cl_col = find_col(['Closed conversations']) or 'Closed'
+        cs_col = find_col(['CSAT', 'Rating', 'Score']) or 'CSAT'
+        fr_col = find_col(['First response', 'FRT']) or 'FRT'
+
+        # 6. FORCE CREATE COLUMNS (This prevents the KeyError)
+        if t_col not in df.columns: df[t_col] = "Unknown"
+        if a_col not in df.columns: df[a_col] = 0
+        if cl_col not in df.columns: df[cl_col] = 0
+        if fr_col not in df.columns: df[fr_col] = 0
+        
+        # 7. CLEAN & FILTER
+        # Filter out Summary/Totals
+        df = df[df[t_col].notna()]
+        df = df[~df[t_col].str.contains('Summary|Total', na=False, case=False)]
+
+        # Numeric Conversion
+        for c in [a_col, cl_col, fr_col]:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '').str.replace('"', ''), errors='coerce').fillna(0)
+
+        # SPECIAL HANDLING FOR CSAT_Numeric
+        if cs_col in df.columns:
+            df['CSAT_Numeric'] = df[cs_col].astype(str).str.extract(r'(\d+\.?\d*)').astype(float).fillna(0)
+        else:
+            df['CSAT_Numeric'] = 0.0
+
+        # Create a standardized map to return
+        final_map = {
+            'teammate': t_col,
+            'assigned': a_col,
+            'closed': cl_col,
+            'frt': fr_col
         }
 
-        # 6. Filter out 'Summary' and 'Total' rows
-        df = df[df[col_map['teammate']].notna()]
-        df = df[~df[col_map['teammate']].str.contains('Summary|Total', na=False, case=False)]
-
-        # 7. Convert numeric columns
-        for key in ['assigned', 'closed', 'frt']:
-            c = col_map[key]
-            if c:
-                df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '').str.replace('"', ''), errors='coerce').fillna(0)
-
-        # 8. Extract CSAT
-        if col_map['csat']:
-            df['CSAT_Numeric'] = df[col_map['csat']].astype(str).str.extract(r'(\d+\.?\d*)').astype(float).fillna(0)
-
-        return df, col_map
+        return df, final_map
 
     except Exception as e:
         st.error(f"Error processing file: {e}")
         return None
 
-# --- APP LAYOUT ---
-st.sidebar.header("Upload Center")
+# --- UI ---
 current_file = st.sidebar.file_uploader("Upload Current CSV", type="csv")
-previous_file = st.sidebar.file_uploader("Upload Previous CSV (for Gap Analysis)", type="csv")
+previous_file = st.sidebar.file_uploader("Upload Previous CSV", type="csv")
 
 if current_file:
     result = process_data(current_file)
     if result:
         df, cmap = result
         
-        # --- CALCULATIONS ---
-        total_tickets = df[cmap['assigned']].sum()
-        avg_csat = df['CSAT_Numeric'][df['CSAT_Numeric'] > 0].mean()
+        # CALCULATIONS (With safeties)
+        total_assigned = df[cmap['assigned']].sum()
+        avg_csat = df['CSAT_Numeric'][df['CSAT_Numeric'] > 0].mean() if not df[df['CSAT_Numeric'] > 0].empty else 0
         med_frt = df[cmap['frt']].median()
 
-        # --- TOP METRICS ---
+        # METRICS
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Assigned", f"{int(total_tickets):,}")
+        m1.metric("Total Tickets", f"{int(total_assigned):,}")
         m2.metric("Avg Team CSAT", f"{avg_csat:.1f}%")
-        m3.metric("Med. Response", f"{int(med_frt)}s")
-        m4.metric("Team Size", len(df))
+        m3.metric("Median Response", f"{int(med_frt)}s")
+        m4.metric("Teammates", len(df))
 
-        # --- GAP ANALYSIS ---
+        # GAP ANALYSIS
         if previous_file:
-            prev_result = process_data(previous_file)
-            if prev_result:
-                pdf, pcmap = prev_result
-                st.subheader("📉 Performance Gap Analysis")
+            p_result = process_data(previous_file)
+            if p_result:
+                pdf, pcmap = p_result
+                st.subheader("📉 Gap Analysis")
                 
-                # Volume Change
-                prev_total = pdf[pcmap['assigned']].sum()
-                vol_delta = total_tickets - prev_total
+                p_total = pdf[pcmap['assigned']].sum()
+                v_delta = total_assigned - p_total
                 
-                # CSAT Change
-                prev_csat = pdf['CSAT_Numeric'][pdf['CSAT_Numeric'] > 0].mean()
-                csat_delta = avg_csat - prev_csat
+                p_csat = pdf['CSAT_Numeric'][pdf['CSAT_Numeric'] > 0].mean() if not pdf[pdf['CSAT_Numeric'] > 0].empty else 0
+                c_delta = avg_csat - p_csat
                 
                 g1, g2 = st.columns(2)
-                g1.metric("Volume vs Previous Upload", f"{int(total_tickets):,}", delta=f"{int(vol_delta)} tickets", delta_color="inverse")
-                g2.metric("CSAT vs Previous Upload", f"{avg_csat:.1f}%", delta=f"{csat_delta:.1f}%")
+                g1.metric("Volume Change", f"{int(total_assigned):,}", delta=f"{int(v_delta)} tickets", delta_color="inverse")
+                g2.metric("CSAT Change", f"{avg_csat:.1f}%", delta=f"{c_delta:.1f}%")
 
-        # --- CHARTS ---
+        # CHARTS
         st.divider()
-        col_left, col_right = st.columns(2)
-        
-        with col_left:
-            st.write("### 🏆 CSAT Ranking")
-            fig = px.bar(df.sort_values('CSAT_Numeric'), x='CSAT_Numeric', y=cmap['teammate'], 
-                         orientation='h', color='CSAT_Numeric', color_continuous_scale='RdYlGn',
-                         template="plotly_white")
+        l, r = st.columns(2)
+        with l:
+            st.write("### CSAT by Teammate")
+            fig = px.bar(df.sort_values('CSAT_Numeric'), x='CSAT_Numeric', y=cmap['teammate'], orientation='h', color='CSAT_Numeric', color_continuous_scale='RdYlGn')
             st.plotly_chart(fig, use_container_width=True)
-            
-        with col_right:
-            st.write("### ⚡ Response Time vs Volume")
-            fig2 = px.scatter(df, x=cmap['assigned'], y=cmap['frt'], 
-                              size=cmap['closed'], hover_name=cmap['teammate'],
-                              color='CSAT_Numeric', color_continuous_scale='Viridis',
-                              template="plotly_white")
+        with r:
+            st.write("### Workload vs Speed")
+            fig2 = px.scatter(df, x=cmap['assigned'], y=cmap['frt'], size=cmap['closed'], hover_name=cmap['teammate'], color='CSAT_Numeric')
             st.plotly_chart(fig2, use_container_width=True)
 
-        # --- DATA TABLE ---
-        with st.expander("🔍 View All Teammate Data"):
-            st.dataframe(df[[cmap['teammate'], cmap['assigned'], cmap['closed'], 'CSAT_Numeric', cmap['frt']]])
-else:
-    st.info("👋 Ready for analysis! Please upload the April CSV export to begin.")
+        with st.expander("Raw Data Table"):
+            st.dataframe(df)
