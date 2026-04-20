@@ -1,137 +1,151 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import io
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="Grey CS Intelligence", layout="wide", page_icon="📈")
+# --- 1. BRANDING & STYLE ---
+st.set_page_config(page_title="Grey | Customer Intelligence", layout="wide", page_icon="🔘")
 
-st.title("📊 Grey Customer Success Intelligence")
+# Grey.co inspired styling
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    .main { background-color: #F8F9FB; }
+    .stMetric { background-color: #ffffff; padding: 20px; border-radius: 12px; border: 1px solid #EDEFEF; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }
+    div[data-testid="stExpander"] { background-color: #ffffff; border-radius: 12px; }
+    .status-card { background: white; padding: 20px; border-radius: 12px; border-left: 5px solid #000000; }
+    </style>
+    """, unsafe_allow_html=True)
 
+# --- 2. DATA ENGINE ---
 def process_data(file):
     if file is None: return None
-    
     try:
-        # 1. Read raw text
         bytes_data = file.getvalue()
         text_data = bytes_data.decode("utf-8").splitlines()
+        header_idx = next((i for i, line in enumerate(text_data) if "Teammate" in line and "Conversations" in line), None)
+        if header_idx is None: return None
         
-        # 2. Find the header row
-        header_row_index = None
-        for i, line in enumerate(text_data):
-            if "Teammate" in line and "Conversations" in line:
-                header_row_index = i
-                break
-        
-        if header_row_index is None:
-            st.error("Could not find the data table. Please ensure you are uploading an Intercom Teammate Performance CSV.")
-            return None
-
-        # 3. Load CSV
-        clean_text = "\n".join(text_data[header_row_index:])
-        df = pd.read_csv(io.StringIO(clean_text))
-        
-        # 4. Clean column names
+        df = pd.read_csv(io.StringIO("\n".join(text_data[header_idx:])))
         df.columns = df.columns.str.strip().str.replace('"', '').str.replace("'", "")
         
-        # 5. DYNAMIC COLUMN MAPPING
-        def find_col(keywords):
-            for col in df.columns:
-                if any(k.lower() in col.lower() for k in keywords):
-                    return col
-            return None
-
-        # Map columns or use a dummy name if not found
-        t_col = find_col(['Teammate']) or 'Teammate'
-        a_col = find_col(['Conversations assigned']) or 'Assigned'
-        cl_col = find_col(['Closed conversations']) or 'Closed'
-        cs_col = find_col(['CSAT', 'Rating', 'Score']) or 'CSAT'
-        fr_col = find_col(['First response', 'FRT']) or 'FRT'
-
-        # 6. FORCE CREATE COLUMNS (This prevents the KeyError)
-        if t_col not in df.columns: df[t_col] = "Unknown"
-        if a_col not in df.columns: df[a_col] = 0
-        if cl_col not in df.columns: df[cl_col] = 0
-        if fr_col not in df.columns: df[fr_col] = 0
+        # Mapping
+        t_col = next((c for c in df.columns if 'Teammate' in c), 'Teammate')
+        a_col = next((c for c in df.columns if 'assigned' in c.lower()), 'Assigned')
+        cl_col = next((c for c in df.columns if 'closed' in c.lower() and 'hour' not in c.lower()), 'Closed')
+        cs_col = next((c for c in df.columns if 'CSAT' in c), 'CSAT')
+        fr_col = next((c for c in df.columns if 'First response' in c), 'FRT')
         
-        # 7. CLEAN & FILTER
-        # Filter out Summary/Totals
-        df = df[df[t_col].notna()]
-        df = df[~df[t_col].str.contains('Summary|Total', na=False, case=False)]
+        # Clean & Filter
+        df = df[df[t_col].notna() & ~df[t_col].str.contains('Summary|Total', case=False, na=False)]
+        
+        # Numeric clean
+        for col in [a_col, cl_col, fr_col]:
+            df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        
+        df['CSAT_Numeric'] = df[cs_col].astype(str).str.extract(r'(\d+\.?\d*)').astype(float).fillna(0)
+        
+        return df, {'t': t_col, 'a': a_col, 'cl': cl_col, 'fr': fr_col, 'cs': cs_col}
+    except: return None
 
-        # Numeric Conversion
-        for c in [a_col, cl_col, fr_col]:
-            df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '').str.replace('"', ''), errors='coerce').fillna(0)
+# --- 3. SIDEBAR ---
+with st.sidebar:
+    st.image("https://images.squarespace-cdn.com/content/v1/6149a46f2541810d72023d60/8604314e-6e2c-473d-8e8e-d965e6480928/Grey_Logo_Black.png", width=150)
+    st.title("Settings")
+    current_file = st.file_uploader("Upload Current Period", type="csv")
+    previous_file = st.file_uploader("Upload Comparison Period", type="csv")
+    st.divider()
+    target_csat = st.slider("CSAT Target %", 0, 100, 85)
 
-        # SPECIAL HANDLING FOR CSAT_Numeric
-        if cs_col in df.columns:
-            df['CSAT_Numeric'] = df[cs_col].astype(str).str.extract(r'(\d+\.?\d*)').astype(float).fillna(0)
-        else:
-            df['CSAT_Numeric'] = 0.0
-
-        # Create a standardized map to return
-        final_map = {
-            'teammate': t_col,
-            'assigned': a_col,
-            'closed': cl_col,
-            'frt': fr_col
-        }
-
-        return df, final_map
-
-    except Exception as e:
-        st.error(f"Error processing file: {e}")
-        return None
-
-# --- UI ---
-current_file = st.sidebar.file_uploader("Upload Current CSV", type="csv")
-previous_file = st.sidebar.file_uploader("Upload Previous CSV", type="csv")
-
+# --- 4. MAIN DASHBOARD ---
 if current_file:
-    result = process_data(current_file)
-    if result:
-        df, cmap = result
+    curr_data = process_data(current_file)
+    if curr_data:
+        df, m = curr_data
         
-        # CALCULATIONS (With safeties)
-        total_assigned = df[cmap['assigned']].sum()
-        avg_csat = df['CSAT_Numeric'][df['CSAT_Numeric'] > 0].mean() if not df[df['CSAT_Numeric'] > 0].empty else 0
-        med_frt = df[cmap['frt']].median()
+        # Header
+        st.title("Dashboard Overview")
+        st.markdown(f"Analysis for **{len(df)} Teammates**")
 
-        # METRICS
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Tickets", f"{int(total_assigned):,}")
-        m2.metric("Avg Team CSAT", f"{avg_csat:.1f}%")
-        m3.metric("Median Response", f"{int(med_frt)}s")
-        m4.metric("Teammates", len(df))
+        # Top KPIs
+        avg_csat = df['CSAT_Numeric'][df['CSAT_Numeric']>0].mean()
+        total_a = df[m['a']].sum()
+        med_frt = df[m['fr']].median()
 
-        # GAP ANALYSIS
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Total Tickets", f"{int(total_assigned := total_a):,}")
+        k2.metric("Avg CSAT", f"{avg_csat:.1f}%")
+        k3.metric("Med. Response", f"{int(med_frt)}s")
+        k4.metric("Resolution Rate", f"{(df[m['cl']].sum()/total_a*100):.1f}%")
+
+        # --- GAP ANALYSIS SECTION ---
         if previous_file:
-            p_result = process_data(previous_file)
-            if p_result:
-                pdf, pcmap = p_result
-                st.subheader("📉 Gap Analysis")
+            st.divider()
+            st.subheader("📉 The Performance Gap")
+            prev_data = process_data(previous_file)
+            if prev_data:
+                pdf, pm = prev_data
                 
-                p_total = pdf[pcmap['assigned']].sum()
-                v_delta = total_assigned - p_total
+                # Merge data to compare teammates
+                gap_df = pd.merge(
+                    df[[m['t'], 'CSAT_Numeric', m['a']]], 
+                    pdf[[pm['t'], 'CSAT_Numeric', pm['a']]], 
+                    left_on=m['t'], right_on=pm['t'], 
+                    suffixes=('_curr', '_prev')
+                )
+                gap_df['CSAT_Delta'] = gap_df['CSAT_Numeric_curr'] - gap_df['CSAT_Numeric_prev']
                 
-                p_csat = pdf['CSAT_Numeric'][pdf['CSAT_Numeric'] > 0].mean() if not pdf[pdf['CSAT_Numeric'] > 0].empty else 0
-                c_delta = avg_csat - p_csat
+                # Visualizing the Movers
+                col_left, col_right = st.columns(2)
+                with col_left:
+                    st.write("### 🚀 Top CSAT Improvers")
+                    improvers = gap_df.sort_values('CSAT_Delta', ascending=False).head(5)
+                    fig_imp = px.bar(improvers, x='CSAT_Delta', y=m['t']+'_curr', orientation='h', 
+                                     color_discrete_sequence=['#2ECC71'])
+                    st.plotly_chart(fig_imp, use_container_width=True)
                 
-                g1, g2 = st.columns(2)
-                g1.metric("Volume Change", f"{int(total_assigned):,}", delta=f"{int(v_delta)} tickets", delta_color="inverse")
-                g2.metric("CSAT Change", f"{avg_csat:.1f}%", delta=f"{c_delta:.1f}%")
+                with col_right:
+                    st.write("### ⚠️ Performance Declines")
+                    decliners = gap_df.sort_values('CSAT_Delta', ascending=True).head(5)
+                    fig_dec = px.bar(decliners, x='CSAT_Delta', y=m['t']+'_curr', orientation='h', 
+                                     color_discrete_sequence=['#E74C3C'])
+                    st.plotly_chart(fig_dec, use_container_width=True)
 
-        # CHARTS
+        # --- COACHING QUADRANT ---
         st.divider()
-        l, r = st.columns(2)
-        with l:
-            st.write("### CSAT by Teammate")
-            fig = px.bar(df.sort_values('CSAT_Numeric'), x='CSAT_Numeric', y=cmap['teammate'], orientation='h', color='CSAT_Numeric', color_continuous_scale='RdYlGn')
-            st.plotly_chart(fig, use_container_width=True)
-        with r:
-            st.write("### Workload vs Speed")
-            fig2 = px.scatter(df, x=cmap['assigned'], y=cmap['frt'], size=cmap['closed'], hover_name=cmap['teammate'], color='CSAT_Numeric')
-            st.plotly_chart(fig2, use_container_width=True)
+        st.subheader("🎯 Coaching Strategy Quadrant")
+        
+        # Calculate Medians for Quadrant Lines
+        med_vol = df[m['a']].median()
+        med_csat = df['CSAT_Numeric'].median()
+        
+        fig_quad = px.scatter(df, x=m['a'], y='CSAT_Numeric', 
+                             text=m['t'], size=m['cl'], color='CSAT_Numeric',
+                             color_continuous_scale='RdYlGn',
+                             labels={m['a']: 'Volume (Tickets)', 'CSAT_Numeric': 'Quality (CSAT %)'})
+        
+        # Add Quadrant lines
+        fig_quad.add_hline(y=med_csat, line_dash="dot", annotation_text="Quality Median")
+        fig_quad.add_vline(x=med_vol, line_dash="dot", annotation_text="Volume Median")
+        
+        st.plotly_chart(fig_quad, use_container_width=True)
+        
+        with st.expander("How to read this chart?"):
+            st.write("""
+            - **Top Right (High Volume, High CSAT):** Your Rockstars.
+            - **Top Left (Low Volume, High CSAT):** Quality focused, can take more tickets.
+            - **Bottom Right (High Volume, Low CSAT):** Burnout risk! Moving fast but losing quality.
+            - **Bottom Left (Low Volume, Low CSAT):** Needs urgent coaching or training.
+            """)
 
-        with st.expander("Raw Data Table"):
-            st.dataframe(df)
+        # --- DATA TABLE ---
+        st.divider()
+        st.subheader("📋 Raw Intelligence Feed")
+        st.dataframe(df[[m['t'], m['a'], m['cl'], 'CSAT_Numeric', m['fr']]].style.background_gradient(subset=['CSAT_Numeric'], cmap='RdYlGn'))
+
+else:
+    # Landing Page
+    st.info("👋 Hello Zeek! Please upload the April CSV data in the sidebar to generate the Grey Intelligence Report.")
+    st.image("https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExNHJueGZ4bmZ4bmZ4bmZ4bmZ4bmZ4bmZ4bmZ4bmZ4bmZ4bmZ4bmZ4JmVwPXYxX2ludGVybmFsX2dpZl9ieV9pZCZjdD1n/3o7TKMGpxV90dcI012/giphy.gif")
